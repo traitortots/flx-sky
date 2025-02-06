@@ -1,50 +1,53 @@
 import datetime
-
 from collections import defaultdict
-
 from atproto import models
-
 from server import config
 from server.logger import logger
 from server.database import db, Post
 
+# Define Finger Lakes region keywords
+FLX_KEYWORDS = {
+    'ithaca', 'tompkins', '14850', 'flxsky', 'cornell', 'ithacany', 
+    'fingerlakes', 'cayuga', 'trumansburg'
+}
+
+# Add any specific users to always include (replace with actual DIDs)
+ALWAYS_INCLUDE_USERS = {
+    # 'did:plc:example1',
+    # 'did:plc:example2',
+}
 
 def is_archive_post(record: 'models.AppBskyFeedPost.Record') -> bool:
-    # Sometimes users will import old posts from Twitter/X which con flood a feed with
-    # old posts. Unfortunately, the only way to test for this is to look an old
-    # created_at date. However, there are other reasons why a post might have an old
-    # date, such as firehose or firehose consumer outages. It is up to you, the feed
-    # creator to weigh the pros and cons, amd and optionally include this function in
-    # your filter conditions, and adjust the threshold to your liking.
-    #
-    # See https://github.com/MarshalX/bluesky-feed-generator/pull/21
-
     archived_threshold = datetime.timedelta(days=1)
     created_at = datetime.datetime.fromisoformat(record.created_at)
     now = datetime.datetime.now(datetime.UTC)
-
     return now - created_at > archived_threshold
-
 
 def should_ignore_post(record: 'models.AppBskyFeedPost.Record') -> bool:
     if config.IGNORE_ARCHIVED_POSTS and is_archive_post(record):
         logger.debug(f'Ignoring archived post: {record.uri}')
         return True
-
-    if config.IGNORE_REPLY_POSTS and record.reply:
-        logger.debug(f'Ignoring reply post: {record.uri}')
-        return True
-
+    
+    # Note: We're not ignoring replies as per requirements
     return False
 
+def is_flx_relevant(text: str, author: str) -> bool:
+    """Check if post is relevant to Finger Lakes region."""
+    # Check if author is in our always-include list
+    if author in ALWAYS_INCLUDE_USERS:
+        return True
+    
+    # Convert text to lowercase for case-insensitive matching
+    text_lower = text.lower()
+    
+    # Check for any of our keywords
+    for keyword in FLX_KEYWORDS:
+        if keyword in text_lower:
+            return True
+    
+    return False
 
 def operations_callback(ops: defaultdict) -> None:
-    # Here we can filter, process, run ML classification, etc.
-    # After our feed alg we can save posts into our DB
-    # Also, we should process deleted posts to remove them from our DB and keep it in sync
-
-    # for example, let's create our custom feed that will contain all posts that contains alf related text
-
     posts_to_create = []
     for created_post in ops[models.ids.AppBskyFeedPost]['created']:
         author = created_post['author']
@@ -54,7 +57,7 @@ def operations_callback(ops: defaultdict) -> None:
         post_with_video = isinstance(record.embed, models.AppBskyEmbedVideo.Main)
         inlined_text = record.text.replace('\n', ' ')
 
-        # print all texts just as demo that data stream works
+        # Log all posts for debugging
         logger.debug(
             f'NEW POST '
             f'[CREATED_AT={record.created_at}]'
@@ -67,27 +70,35 @@ def operations_callback(ops: defaultdict) -> None:
         if should_ignore_post(record):
             continue
 
-        # only python-related posts
-        if 'python' in record.text.lower():
+        # Check if post is relevant to Finger Lakes region
+        if is_flx_relevant(record.text, author):
+            # Get reply information if it exists
             reply_root = reply_parent = None
             if record.reply:
                 reply_root = record.reply.root.uri
                 reply_parent = record.reply.parent.uri
 
+            # Store additional metadata for ranking
             post_dict = {
                 'uri': created_post['uri'],
                 'cid': created_post['cid'],
                 'reply_parent': reply_parent,
                 'reply_root': reply_root,
+                'indexed_at': datetime.datetime.now(datetime.UTC),
+                'text': record.text,  # Store text for potential re-filtering
+                'has_media': post_with_images or post_with_video,
+                'author': author,
             }
             posts_to_create.append(post_dict)
 
+    # Handle deleted posts
     posts_to_delete = ops[models.ids.AppBskyFeedPost]['deleted']
     if posts_to_delete:
         post_uris_to_delete = [post['uri'] for post in posts_to_delete]
         Post.delete().where(Post.uri.in_(post_uris_to_delete))
         logger.debug(f'Deleted from feed: {len(post_uris_to_delete)}')
 
+    # Create new posts
     if posts_to_create:
         with db.atomic():
             for post_dict in posts_to_create:
