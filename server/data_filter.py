@@ -13,8 +13,8 @@ FLX_KEYWORDS = {
 
 # Add any specific users to always include (replace with actual DIDs)
 ALWAYS_INCLUDE_USERS = {
-    # 'did:plc:example1',
-    # 'did:plc:example2',
+    'did:plc:oynycxf3neiejuf272tswm5n', # Ithaca Voice
+    'did:plc:wekkzymalzgyxlboce5ezecm' # Ithaca Murals
 }
 
 def is_archive_post(record: 'models.AppBskyFeedPost.Record') -> bool:
